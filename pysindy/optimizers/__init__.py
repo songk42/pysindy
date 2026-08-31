@@ -13,6 +13,10 @@ try:
 except (ImportError, NameError):
     pass
 try:
+    from .constrained_stlsq import ConstrainedSTLSQ
+except (ImportError, NameError):
+    pass
+try:
     from .miosr import MIOSR
 except (ImportError, NameError):
     pass
@@ -41,6 +45,7 @@ __all__ = [
     "SR3",
     "STLSQ",
     "ConstrainedSR3",
+    "ConstrainedSTLSQ",
     "StableLinearSR3",
     "TrappingSR3",
     "SSR",

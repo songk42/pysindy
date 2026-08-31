@@ -47,6 +47,10 @@ try:
 except (ImportError, NameError):
     pass
 try:
+    from .optimizers import ConstrainedSTLSQ
+except (ImportError, NameError):
+    pass
+try:
     from .optimizers import MIOSR
 except (ImportError, NameError):
     pass
