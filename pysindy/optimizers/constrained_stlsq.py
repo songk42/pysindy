@@ -86,6 +86,13 @@ class ConstrainedSTLSQ(BaseOptimizer):
     verbose : bool, optional (default False)
         If True, prints out the different error terms every iteration.
 
+    unbias : bool, optional (default True)
+        Whether to refit the coefficients on the final support with no
+        ridge penalty (``alpha=0``), still subject to ``Cw = d``. This removes
+        the bias introduced by ``alpha``. Unlike the base-class unbias step,
+        which is an unconstrained per-target least-squares fit, the refit
+        keeps the constraints satisfied.
+
     Attributes
     ----------
     coef_ : array, shape (n_targets, n_features)
@@ -103,7 +110,7 @@ class ConstrainedSTLSQ(BaseOptimizer):
     --------
     >>> import numpy as np
     >>> from scipy.integrate import odeint
-    >>> from pysindy import SINDy
+    >>> from pysindy import PolynomialLibrary, SINDy
     >>> from pysindy.optimizers import ConstrainedSTLSQ
     >>> lorenz = lambda z,t : [10*(z[1] - z[0]),
     >>>                        z[0]*(28 - z[2]) - z[1],
@@ -120,7 +127,7 @@ class ConstrainedSTLSQ(BaseOptimizer):
     >>> opt = ConstrainedSTLSQ(
     ...     threshold=.1, alpha=.5, constraint_lhs=lhs, constraint_rhs=rhs
     ... )
-    >>> model = SINDy(optimizer=opt)
+    >>> model = SINDy(optimizer=opt, feature_library=PolynomialLibrary(degree=1))
     >>> model.fit(x, t=t[1]-t[0])
     """
 
@@ -136,13 +143,14 @@ class ConstrainedSTLSQ(BaseOptimizer):
         copy_X=True,
         initial_guess=None,
         verbose=False,
+        unbias=True,
     ):
         super().__init__(
             max_iter=max_iter,
             copy_X=copy_X,
             normalize_columns=normalize_columns,
             initial_guess=initial_guess,
-            unbias=False,
+            unbias=unbias,
         )
 
         if threshold < 0:
@@ -173,7 +181,16 @@ class ConstrainedSTLSQ(BaseOptimizer):
             last_coef = np.zeros_like(this_coef)
         return all(bool(i) == bool(j) for i, j in zip(this_coef, last_coef))
 
-    def _regress(self, x: np.ndarray, y: np.ndarray, ind: np.ndarray, constraint_lhs):
+    def _constraint_lhs_feature_order(self, n_features):
+        if self.constraint_order == "target":
+            return reorder_constraints(
+                self.constraint_lhs, n_features, output_order="feature"
+            )
+        return self.constraint_lhs
+
+    def _regress(
+        self, x: np.ndarray, y: np.ndarray, ind: np.ndarray, constraint_lhs, alpha=None
+    ):
         """Solve the equality-constrained ridge regression
 
         .. math::
@@ -208,7 +225,8 @@ class ConstrainedSTLSQ(BaseOptimizer):
             x_block[rows, cols] = x[:, active_cols[i]]
             y_stack[rows] = y[:, i]
 
-        h = x_block.T.dot(x_block) + self.alpha * np.eye(total_active)
+        alpha = self.alpha if alpha is None else alpha
+        h = x_block.T.dot(x_block) + alpha * np.eye(total_active)
         g = x_block.T.dot(y_stack)
 
         # constraint_lhs columns are grouped feature-major:
@@ -235,7 +253,6 @@ class ConstrainedSTLSQ(BaseOptimizer):
 
         for i in range(n_targets):
             coef_full[i, active_cols[i]] = w_active[offsets[i] : offsets[i + 1]]
-        self.iters += 1
         return coef_full
 
     def _reduce(self, x, y):
@@ -249,13 +266,7 @@ class ConstrainedSTLSQ(BaseOptimizer):
             self.coef_ = self.initial_guess
 
         n_targets, n_features = self.coef_.shape
-
-        if self.constraint_order == "target":
-            constraint_lhs = reorder_constraints(
-                self.constraint_lhs, n_features, output_order="feature"
-            )
-        else:
-            constraint_lhs = self.constraint_lhs
+        constraint_lhs = self._constraint_lhs_feature_order(n_features)
 
         ind = self.ind_
         n_features_selected = np.sum(ind)
@@ -284,6 +295,7 @@ class ConstrainedSTLSQ(BaseOptimizer):
                 break
 
             optvar = self._regress(x, y, ind, constraint_lhs)
+            self.iters += 1
             ind = np.abs(optvar) >= self.threshold
             optvar[~ind] = 0
 
@@ -309,6 +321,17 @@ class ConstrainedSTLSQ(BaseOptimizer):
 
         self.coef_ = optvar
         self.ind_ = ind
+
+    def _unbias(self, x: np.ndarray, y: np.ndarray):
+        """Refit on the final support with alpha=0, keeping Cw = d.
+
+        Overrides the base-class unbias step, whose unconstrained per-target
+        least squares would break the constraints.
+        """
+        if not np.any(self.ind_):
+            return
+        constraint_lhs = self._constraint_lhs_feature_order(self.coef_.shape[1])
+        self.coef_ = self._regress(x, y, self.ind_, constraint_lhs, alpha=0.0)
 
     @property
     def complexity(self):

@@ -24,6 +24,7 @@ from pysindy.feature_library import CustomLibrary
 from pysindy.feature_library import SINDyPILibrary
 from pysindy.optimizers import BaseOptimizer
 from pysindy.optimizers import ConstrainedSR3
+from pysindy.optimizers import ConstrainedSTLSQ
 from pysindy.optimizers import EnsembleOptimizer
 from pysindy.optimizers import EvidenceGreedy  # changes
 from pysindy.optimizers import FROLS
@@ -1246,3 +1247,23 @@ def test_ssr_inflection(errs, expected):
 def test_ssr_inflection_bad_args(errs, expected, message):
     with pytest.raises(expected, match=message):
         _ind_inflection(errs)
+
+
+def test_constrained_stlsq_unbias_removes_ridge_bias():
+    rng = np.random.default_rng(0)
+    x = rng.standard_normal((500, 4))
+    # target order: coef[0, 1] + coef[1, 2] = 0
+    coef_true = np.array([[0.0, 2.0, 0.0, 1.0], [0.0, 0.0, -2.0, 0.0]])
+    y = x @ coef_true.T
+    lhs = np.zeros((1, 8))
+    lhs[0, 1] = 1
+    lhs[0, 4 + 2] = 1
+    rhs = np.zeros(1)
+
+    kwargs = dict(threshold=0.1, alpha=100.0, constraint_lhs=lhs, constraint_rhs=rhs)
+    biased = ConstrainedSTLSQ(unbias=False, **kwargs).fit(x, y)
+    unbiased = ConstrainedSTLSQ(**kwargs).fit(x, y)
+
+    assert not np.allclose(biased.coef_, coef_true, atol=1e-3)
+    np.testing.assert_allclose(unbiased.coef_, coef_true, atol=1e-10)
+    np.testing.assert_allclose(lhs @ unbiased.coef_.flatten(), rhs, atol=1e-10)
