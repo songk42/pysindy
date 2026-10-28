@@ -696,7 +696,15 @@ def test_constrained_sr3_prox_functions(data_derivative_1d, regularizer):
     ("opt_cls", "opt_args"),
     (
         (SR3, {"trimming_fraction": 0.1}),
-        (ConstrainedSR3, {"constraint_lhs": [1], "constraint_rhs": [1]}),
+        (
+            ConstrainedSR3,
+            {
+                "constraint_lhs": [1],
+                "constraint_rhs": [1],
+                "inequality_constraints": True,
+                "regularizer": "l1",
+            },
+        ),
         (ConstrainedSR3, {"trimming_fraction": 0.1}),
         (TrappingSR3, {"_n_tgts": 1, "constraint_lhs": [1], "constraint_rhs": [1]}),
         (StableLinearSR3, {"constraint_lhs": [1], "constraint_rhs": [1]}),
@@ -1267,3 +1275,150 @@ def test_constrained_stlsq_unbias_removes_ridge_bias():
     assert not np.allclose(biased.coef_, coef_true, atol=1e-3)
     np.testing.assert_allclose(unbiased.coef_, coef_true, atol=1e-10)
     np.testing.assert_allclose(lhs @ unbiased.coef_.flatten(), rhs, atol=1e-10)
+
+
+def test_constrained_stlsq_normalize_columns_keeps_constraints():
+    rng = np.random.default_rng(0)
+    # very different column scales, so normalized and raw coefficients differ
+    x = rng.standard_normal((500, 4)) * np.array([1.0, 10.0, 0.1, 3.0])
+    # target order: coef[0, 1] + coef[1, 2] = 0
+    coef_true = np.array([[0.0, 2.0, 0.0, 1.0], [0.0, 0.0, -2.0, 0.0]])
+    y = x @ coef_true.T + 0.01 * rng.standard_normal((500, 2))
+    lhs = np.zeros((1, 8))
+    lhs[0, 1] = 1
+    lhs[0, 4 + 2] = 1
+    rhs = np.zeros(1)
+
+    opt = ConstrainedSTLSQ(
+        threshold=0.1,
+        alpha=0.0,
+        constraint_lhs=lhs,
+        constraint_rhs=rhs,
+        normalize_columns=True,
+    ).fit(x, y)
+
+    np.testing.assert_allclose(lhs @ opt.coef_.flatten(), rhs, atol=1e-10)
+    np.testing.assert_array_equal(opt.coef_ != 0, coef_true != 0)
+    np.testing.assert_allclose(opt.coef_, coef_true, atol=1e-2)
+
+
+def _scaled_constrained_problem(seed=0):
+    rng = np.random.default_rng(seed)
+    # very different column scales, so normalized and raw coefficients differ
+    x = rng.standard_normal((500, 4)) * np.array([1.0, 10.0, 0.1, 3.0])
+    # target order: coef[0, 1] + coef[1, 2] = 0
+    coef_true = np.array([[0.0, 2.0, 0.0, 1.0], [0.0, 0.0, -2.0, 0.0]])
+    y = x @ coef_true.T + 0.01 * rng.standard_normal((500, 2))
+    lhs = np.zeros((1, 8))
+    lhs[0, 1] = 1
+    lhs[0, 4 + 2] = 1
+    return x, y, coef_true, lhs, np.zeros(1)
+
+
+@pytest.mark.parametrize(
+    "opt_kwargs",
+    (
+        dict(reg_weight_lam=0.0),
+        dict(reg_weight_lam=0.1, regularizer="l1", unbias=True),
+        dict(reg_weight_lam=0.1, regularizer="l0", unbias=True),
+    ),
+)
+def test_constrained_sr3_normalize_columns_keeps_constraints(opt_kwargs):
+    x, y, coef_true, lhs, rhs = _scaled_constrained_problem()
+    opt = ConstrainedSR3(
+        constraint_lhs=lhs,
+        constraint_rhs=rhs,
+        equality_constraints=True,
+        normalize_columns=True,
+        max_iter=500,
+        **opt_kwargs,
+    ).fit(x, y)
+
+    np.testing.assert_allclose(lhs @ opt.coef_.flatten(), rhs, atol=1e-8)
+    np.testing.assert_allclose(opt.coef_, coef_true, atol=1e-2)
+    # the user's constraint matrix is left untouched
+    np.testing.assert_array_equal(opt.constraint_lhs, lhs)
+
+
+def test_constrained_sr3_unbias_removes_l1_bias():
+    x, y, coef_true, lhs, rhs = _scaled_constrained_problem()
+    kwargs = dict(
+        reg_weight_lam=0.5,
+        regularizer="l1",
+        constraint_lhs=lhs,
+        constraint_rhs=rhs,
+        equality_constraints=True,
+        max_iter=500,
+    )
+    biased = ConstrainedSR3(**kwargs).fit(x, y)
+    unbiased = ConstrainedSR3(unbias=True, **kwargs).fit(x, y)
+
+    assert not np.allclose(biased.coef_, coef_true, atol=1e-2)
+    np.testing.assert_array_equal(unbiased.coef_ != 0, coef_true != 0)
+    np.testing.assert_allclose(unbiased.coef_, coef_true, atol=1e-3)
+    np.testing.assert_allclose(lhs @ unbiased.coef_.flatten(), rhs, atol=1e-10)
+
+
+def test_constrained_sr3_unbias_restores_constraints_after_thresholding():
+    rng = np.random.default_rng(0)
+    x = rng.standard_normal((500, 4))
+    # coef[0, 0] is below the threshold but takes part in coef[0, 0] + coef[0, 3] = d
+    coef_true = np.array([[1e-3, 2.0, 0.0, 1.0], [0.0, 0.0, -2.0, 0.0]])
+    y = x @ coef_true.T
+    lhs = np.zeros((1, 8))
+    lhs[0, 0] = 1
+    lhs[0, 3] = 1
+    rhs = np.array([1.0 + 1e-3])
+    kwargs = dict(
+        reg_weight_lam=0.05,
+        regularizer="l0",
+        constraint_lhs=lhs,
+        constraint_rhs=rhs,
+        equality_constraints=True,
+        max_iter=500,
+    )
+    thresholded = ConstrainedSR3(**kwargs).fit(x, y)
+    unbiased = ConstrainedSR3(unbias=True, **kwargs).fit(x, y)
+
+    assert not np.allclose(lhs @ thresholded.coef_.flatten(), rhs, atol=1e-8)
+    np.testing.assert_allclose(lhs @ unbiased.coef_.flatten(), rhs, atol=1e-10)
+
+
+@pytest.mark.parametrize("normalize_columns", (False, True))
+def test_constrained_stlsq_inequality_constraints(normalize_columns):
+    x, y, coef_true, lhs, rhs = _scaled_constrained_problem()
+    # active inequality: coef[0, 3] >= 1.5 (truth is 1.0), i.e. -coef[0, 3] <= -1.5
+    ineq_lhs = np.zeros((1, 8))
+    ineq_lhs[0, 3] = -1
+    ineq_rhs = np.array([-1.5])
+    opt = ConstrainedSTLSQ(
+        threshold=0.1,
+        alpha=0.0,
+        constraint_lhs=lhs,
+        constraint_rhs=rhs,
+        inequality_lhs=ineq_lhs,
+        inequality_rhs=ineq_rhs,
+        normalize_columns=normalize_columns,
+    ).fit(x, y)
+
+    np.testing.assert_allclose(lhs @ opt.coef_.flatten(), rhs, atol=1e-6)
+    assert ineq_lhs @ opt.coef_.flatten() <= ineq_rhs + 1e-6
+    np.testing.assert_allclose(opt.coef_[0, 3], 1.5, atol=1e-5)
+    # an inactive inequality leaves the equality-only solution unchanged
+    loose = ConstrainedSTLSQ(
+        threshold=0.1,
+        alpha=0.0,
+        constraint_lhs=lhs,
+        constraint_rhs=rhs,
+        inequality_lhs=ineq_lhs,
+        inequality_rhs=np.array([10.0]),
+        normalize_columns=normalize_columns,
+    ).fit(x, y)
+    eq_only = ConstrainedSTLSQ(
+        threshold=0.1,
+        alpha=0.0,
+        constraint_lhs=lhs,
+        constraint_rhs=rhs,
+        normalize_columns=normalize_columns,
+    ).fit(x, y)
+    np.testing.assert_allclose(loose.coef_, eq_only.coef_, atol=1e-6)

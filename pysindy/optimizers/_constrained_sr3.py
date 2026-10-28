@@ -14,7 +14,8 @@ import numpy as np
 from scipy.linalg import cho_factor
 from sklearn.exceptions import ConvergenceWarning
 
-from ..utils import reorder_constraints
+from .constrained_stlsq import constrained_lstsq
+from .constrained_stlsq import constraint_lhs_for_reduce
 from .sr3 import SR3
 
 
@@ -75,6 +76,17 @@ class ConstrainedSR3(SR3):
         output should be verbose or not. Only relevant for optimizers that
         use the CVXPY package in some capabity.
 
+    unbias : bool, optional (default False)
+        Refit the final support without regularization. With equality
+        constraints the refit is a constrained least-squares solve, so the
+        returned ``coef_`` satisfies ``Cw = d`` (the thresholded ``coef_``
+        otherwise need not; only ``coef_full_`` is guaranteed to). Not
+        available with inequality constraints.
+
+    With ``normalize_columns=True`` the regularization acts on the
+    normalized coefficients, while the constraints are imposed on the
+    coefficients of the original library.
+
     See base class for additional arguments
 
     Attributes
@@ -97,6 +109,10 @@ class ConstrainedSR3(SR3):
         the trapping SINDy problem is nonconvex, meaning that this value
         may increase and decrease as the algorithm works.
     """
+
+    # whether unbias=True may be combined with equality constraints (refit via
+    # constrained least squares); subclasses with extra structure opt out
+    _constrained_unbias = True
 
     def __init__(
         self,
@@ -160,10 +176,15 @@ class ConstrainedSR3(SR3):
                 raise ValueError(
                     "constraint_order must be either 'feature' or 'target'"
                 )
-            if unbias:
+            if unbias and not self._constrained_unbias:
                 raise ValueError(
                     "Constraints are incompatible with an unbiasing step.  Set"
                     " unbias=False"
+                )
+            if unbias and inequality_constraints:
+                raise ValueError(
+                    "Inequality constraints are incompatible with an unbiasing"
+                    " step.  Set unbias=False"
                 )
 
         if inequality_constraints and not cvxpy_flag:
@@ -199,6 +220,28 @@ class ConstrainedSR3(SR3):
                     " constraint_separation_index."
                 )
         self.constraint_separation_index = constraint_separation_index
+
+    def _constraint_lhs_for_reduce(self, n_features):
+        return constraint_lhs_for_reduce(
+            self.constraint_lhs,
+            self.constraint_order.lower(),
+            n_features,
+            self.normalize_columns,
+            getattr(self, "Theta_", None),
+        )
+
+    def _unbias(self, x: np.ndarray, y: np.ndarray):
+        """Refit on the final support without the relaxation/regularization,
+        keeping the equality constraints Cw = d (the base-class unbias step
+        would break them)."""
+        if not self.use_constraints:
+            return super()._unbias(x, y)
+        if not np.any(self.ind_):
+            return
+        constraint_lhs = self._constraint_lhs_for_reduce(self.coef_.shape[1])
+        self.coef_ = constrained_lstsq(
+            x, y, self.ind_, constraint_lhs, np.asarray(self.constraint_rhs, float)
+        )
 
     def _update_full_coef_constraints(self, H, x_transpose_y, coef_sparse):
         g = x_transpose_y + coef_sparse / self.relax_coeff_nu
@@ -314,8 +357,11 @@ class ConstrainedSR3(SR3):
             trimming_array = np.repeat(1.0 - self.trimming_fraction, n_samples)
             self.history_trimming_ = [trimming_array]
 
-        if self.use_constraints and self.constraint_order.lower() == "target":
-            self.constraint_lhs = reorder_constraints(self.constraint_lhs, n_features)
+        # The loop below reads self.constraint_lhs in feature order, acting on
+        # the (possibly column-normalized) coefficients; restored at the end.
+        if self.use_constraints:
+            constraint_lhs_user = self.constraint_lhs
+            self.constraint_lhs = self._constraint_lhs_for_reduce(n_features)
 
         # Precompute some objects for upcoming least-squares solves.
         # Assumes that self.relax_coeff_nu is fixed throughout optimization procedure.
@@ -394,10 +440,8 @@ class ConstrainedSR3(SR3):
                     " iterations.",
                     ConvergenceWarning,
                 )
-        if self.use_constraints and self.constraint_order.lower() == "target":
-            self.constraint_lhs = reorder_constraints(
-                self.constraint_lhs, n_features, output_order="target"
-            )
+        if self.use_constraints:
+            self.constraint_lhs = constraint_lhs_user
         self.coef_ = coef_sparse.T
         self.coef_full_ = coef_full.T
         if self.use_trimming:

@@ -199,6 +199,10 @@ class TrappingSR3(ConstrainedSR3):
     x2' = -2.662 x1 + 1.000 1 x0
     """
 
+    # the constrained least-squares refit would ignore this class's extra
+    # structure, so keep refusing unbias=True with constraints
+    _constrained_unbias = False
+
     def __init__(
         self,
         *,

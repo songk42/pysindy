@@ -91,6 +91,10 @@ class StableLinearSR3(ConstrainedSR3):
         This is the w in the objective function.
     """
 
+    # the constrained least-squares refit would ignore this class's extra
+    # structure, so keep refusing unbias=True with constraints
+    _constrained_unbias = False
+
     def __init__(
         self,
         reg_weight_lam=0.1,
